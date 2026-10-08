@@ -4,6 +4,29 @@ const axios = require('axios');
 const app = express();
 app.use(express.json());
 
+// List of registered GharGarage Technicians
+const TECHNICIANS = [
+  {
+    id: 1,
+    name: 'Rahul Sharma',
+    phone: '919876543210', // Replace with your real test phone number
+    vehicleSpecialty: 'Car & Bike',
+    isAvailable: true
+  },
+  {
+    id: 2,
+    name: 'Amit Kumar',
+    phone: '919123456780', // Second technician number
+    vehicleSpecialty: 'Car',
+    isAvailable: true
+  }
+];
+
+// Helper to check if an incoming WhatsApp number is a technician
+function getTechnicianByPhone(phoneNumber) {
+  return TECHNICIANS.find((tech) => tech.phone === phoneNumber);
+}
+
 // ==========================================
 // CONFIGURATION & CREDENTIALS
 // ==========================================
