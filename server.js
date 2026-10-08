@@ -1,29 +1,41 @@
-const express = require('express');
-const app = express();
-app.use(express.json());
+const axios = require('axios');
 
-// STEP 1 TOKEN: Your custom password (make sure this matches Meta)
-const VERIFY_TOKEN = 'GharGarage_Secret_777';
+const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
+const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 
-// 1. Handshake Endpoint (Meta calls this on "Verify and Save")
-app.get('/webhook', (req, res) => {
-  const mode = req.query['hub.mode'];
-  const token = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
+// Helper: Send Interactive Button Message
+async function sendButtons(to, text, buttons) {
+  return axios.post(
+    `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`,
+    {
+      messaging_product: 'whatsapp',
+      to: to,
+      type: 'interactive',
+      interactive: {
+        type: 'button',
+        body: { text: text },
+        action: {
+          buttons: buttons.map((b) => ({
+            type: 'reply',
+            reply: { id: b.id, title: b.title },
+          })),
+        },
+      },
+    },
+    { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
+  );
+}
 
-  if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-    console.log('Webhook verified successfully by Meta!');
-    return res.status(200).send(challenge);
-  }
-  return res.sendStatus(403);
-});
-
-// 2. Message Receiving Endpoint (Meta posts customer chats & button clicks here)
-app.post('/webhook', (req, res) => {
-  const body = req.body;
-  console.log('New incoming WhatsApp message:', JSON.stringify(body, null, 2));
-  res.status(200).send('EVENT_RECEIVED');
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`GharGarage Server listening on port ${PORT}`));
+// Helper: Send WhatsApp Text Message
+async function sendTextMessage(to, text) {
+  return axios.post(
+    `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`,
+    {
+      messaging_product: 'whatsapp',
+      to: to,
+      type: 'text',
+      text: { body: text },
+    },
+    { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
+  );
+}
