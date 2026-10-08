@@ -123,6 +123,29 @@ async function getWhatsAppMediaUrl(mediaId) {
   }
 }
 
+// Step A: Send Job Alert to Technician
+async function alertTechniciansAboutJob(customerPhone, vehicleType, locationText) {
+  const jobText = 
+`🚨 *NEW GHARGARAGE JOB ALERT!*
+--------------------------------
+*Vehicle:* ${vehicleType}
+*Service:* Doorstep Inspection & Repair
+*Customer Contact:* ${customerPhone}
+*Address:* ${locationText}
+--------------------------------
+Would you like to accept this job?`;
+
+  // Send to Technician Rahul (Replace with your registered technician's phone number)
+  const technicianPhone = '919876543210'; 
+
+  console.log(`Sending job alert to technician at: ${technicianPhone}`);
+
+  await sendButtons(technicianPhone, jobText, [
+    { id: `TECH_ACCEPT_${customerPhone}`, title: '✅ Accept Job' },
+    { id: `TECH_DECLINE_${customerPhone}`, title: '❌ Decline Job' }
+  ]);
+}
+
 async function sendEstimationSlip(customerPhone, bookingId, partsList, totalAmount) {
   const slipText = 
 `📋 *GHARGARAGE ESTIMATION SLIP*
@@ -317,6 +340,19 @@ app.post('/webhook', async (req, res) => {
   } catch (error) {
     console.error('Error processing webhook event:', error);
   }
+
+  // When Customer sends their address/location text
+if (msgType === 'text' && session.state === 'SERVICE_LOCATION') {
+  const customerAddress = message.text.body;
+  session.state = 'DISPATCHED';
+
+  // 1. Confirm to Customer
+  await sendTextMessage(sender, 'Thank you! Finding and alerting the nearest certified technician now... 🔍');
+
+  // 2. Alert the Technician!
+  await alertTechniciansAboutJob(sender, session.vehicle, customerAddress);
+  return;
+}
 });
 
 
