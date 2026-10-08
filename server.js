@@ -78,6 +78,95 @@ async function sendButtons(to, text, buttons) {
   }
 }
 
+async function getWhatsAppMediaUrl(mediaId) {
+  try {
+    // 1. Ask Meta for the direct image download link
+    const res = await axios.get(
+      `https://graph.facebook.com/v20.0/${mediaId}`,
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
+    );
+    const downloadUrl = res.data.url;
+
+    // 2. Download the binary image buffer using your token
+    const imageResponse = await axios.get(downloadUrl, {
+      headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
+      responseType: 'arraybuffer'
+    });
+
+    console.log(`Successfully received image for media ID: ${mediaId}`);
+    return downloadUrl; // Or upload this buffer to Supabase / AWS S3
+  } catch (error) {
+    console.error('Error fetching media:', error.response?.data || error.message);
+  }
+}
+
+async function sendEstimationSlip(customerPhone, bookingId, partsList, totalAmount) {
+  const slipText = 
+`📋 *GHARGARAGE ESTIMATION SLIP*
+*Job ID:* #${bookingId}
+----------------------------------
+*Required Parts & Labor:*
+${partsList}
+----------------------------------
+*Estimated Total:* ₹${totalAmount}
+*(Inclusive of doorstep labor & taxes)*
+
+Please review and confirm to proceed with repairs:`;
+
+  await sendButtons(customerPhone, slipText, [
+    { id: `APPROVE_${bookingId}`, title: '✅ Approve Repair' },
+    { id: `DECLINE_${bookingId}`, title: '❌ Decline' }
+  ]);
+}
+
+const QRCode = require('qrcode');
+
+// Helper to send image messages to WhatsApp
+async function sendImageMessage(to, imageUrl, caption) {
+  await axios.post(
+    `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`,
+    {
+      messaging_product: 'whatsapp',
+      to: to,
+      type: 'image',
+      image: {
+        link: imageUrl,
+        caption: caption
+      }
+    },
+    { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
+  );
+}
+
+// Generate UPI QR Code URL (using a free QR image endpoint or your own upload)
+async function sendPaymentQRCode(customerPhone, bookingId, amount) {
+  const upiId = 'yourbusiness@upi'; // Replace with your merchant UPI ID
+  const payeeName = 'GharGarage';
+  const upiString = `upi://pay?pa=${upiId}&pn=${payeeName}&am=${amount}&tn=Bill_${bookingId}`;
+
+  // Generate public QR code image link
+  const qrImageUrl = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(upiString)}`;
+
+  await sendImageMessage(
+    customerPhone,
+    qrImageUrl,
+    `💳 *GHARGARAGE PAYMENT INVOICE*\nTotal Payable: *₹${amount}*\n\nScan the QR code above using GPay, PhonePe, or Paytm to pay.`
+  );
+}
+
+async function sendReviewRequest(customerPhone) {
+  await sendButtons(
+    customerPhone,
+    '🚗✨ *Service Complete!* \nYour vehicle is ready and tuned. How was your GharGarage doorstep experience?',
+    [
+      { id: 'RATING_5', title: '⭐⭐⭐⭐⭐ Excellent' },
+      { id: 'RATING_4', title: '⭐⭐⭐⭐ Good' },
+      { id: 'RATING_3', title: '⭐⭐⭐ Average' }
+    ]
+  );
+}
+
+
 // ==========================================
 // 1. GET /webhook (Meta Handshake Verification)
 // ==========================================
@@ -206,6 +295,8 @@ app.post('/webhook', async (req, res) => {
     console.error('Error processing webhook event:', error);
   }
 });
+
+
 
 // ==========================================
 // START SERVER
