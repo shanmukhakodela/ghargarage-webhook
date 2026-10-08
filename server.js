@@ -8,15 +8,15 @@ app.use(express.json());
 const TECHNICIANS = [
   {
     id: 1,
-    name: 'Rahul Sharma',
-    phone: '919876543210', // Replace with your real test phone number
+    name: 'Sunil',
+    phone: '8712223439', // Replace with your real test phone number
     vehicleSpecialty: 'Car & Bike',
     isAvailable: true
   },
   {
     id: 2,
-    name: 'Amit Kumar',
-    phone: '919123456780', // Second technician number
+    name: 'Ganesh',
+    phone: '7780736939', // Second technician number
     vehicleSpecialty: 'Car',
     isAvailable: true
   }
