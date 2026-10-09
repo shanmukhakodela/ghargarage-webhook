@@ -388,4 +388,57 @@ app.post('/webhook', async (req, res) => {
           sender,
           session.service || 'Doorstep Service',
           session.vehicle,
-          customerLoca
+          customerLocation
+           );
+
+        // 3. Notify Admin
+        await notifyAdminAboutJob(
+          sender,
+          session.service || 'Doorstep Service',
+          session.vehicle,
+          customerLocation,
+          alertedNames
+        );
+
+        if (alertedNames.length === 0) {
+          await sendTextMessage(
+            sender,
+            'All our technicians are currently busy. Our team will contact you shortly to schedule an appointment!'
+          );
+        }
+        return;
+      }
+    }
+
+    // ----------------------------------------------------
+    // CASE 3: TEXT MESSAGES (Greetings / Reset)
+    // ----------------------------------------------------
+    if (msgType === 'text') {
+      const userText = message.text.body.trim().toLowerCase();
+
+      if (userText === 'hi' || userText === 'hello' || session.state === 'IDLE') {
+        session.state = 'SELECTING_VEHICLE';
+
+        await sendButtons(
+          sender,
+          'Welcome to GharGarage! 🚗🏍️\n"Your Garage, At Your Doorstep."\n\nPlease select your vehicle type to begin:',
+          [
+            { id: 'SELECT_BIKE', title: '🏍️ Bike' },
+            { id: 'SELECT_CAR', title: '🚗 Car' },
+          ]
+        );
+        return;
+      }
+    }
+  } catch (error) {
+    console.error('Error processing webhook event:', error);
+  }
+});
+
+// ==========================================
+// START SERVER
+// ==========================================
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`GharGarage Server is running on port ${PORT}`);
+});
