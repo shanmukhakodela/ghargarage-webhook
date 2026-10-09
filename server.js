@@ -1,46 +1,60 @@
 const express = require('express');
 const axios = require('axios');
+const QRCode = require('qrcode');
 
 const app = express();
 app.use(express.json());
 
-// List of registered GharGarage Technicians
+// ==========================================
+// CONFIGURATION & CREDENTIALS
+// ==========================================
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'GharGarage_Secret_777';
+const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
+const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
+
+// Admin WhatsApp Phone Number (Digits only with country code, e.g., 919876543210)
+const ADMIN_PHONE = (process.env.ADMIN_PHONE || '919876543210').replace(/\D/g, '');
+
+// Registered GharGarage Technicians
 const TECHNICIANS = [
   {
     id: 1,
     name: 'Sunil',
-    phone: '+91 8712223439', // Replace with your real test phone number
+    phone: '+91 8712223439',
     vehicleSpecialty: 'Car & Bike',
-    isAvailable: true
+    isAvailable: true,
   },
   {
     id: 2,
     name: 'Ganesh',
-    phone: '+91 7780736939', // Second technician number
+    phone: '+91 7780736939',
     vehicleSpecialty: 'Car',
-    isAvailable: true
-  }
+    isAvailable: true,
+  },
 ];
 
-// Helper to check if an incoming WhatsApp number is a technician
-function getTechnicianByPhone(phoneNumber) {
-  return TECHNICIANS.find((tech) => tech.phone === phoneNumber);
+// In-memory session store (Use Redis / Supabase in production)
+const userSessions = {};
+
+// Helper: Normalize phone numbers to digits only for WhatsApp Cloud API
+function sanitizePhone(phone) {
+  return phone ? phone.replace(/\D/g, '') : '';
 }
 
-// ==========================================
-// CONFIGURATION & CREDENTIALS
-// ==========================================
-// 1. Secret token you invented for Meta Webhook verification
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'GharGarage_Secret_777';
+// Helper: Find technician by incoming phone number
+function getTechnicianByPhone(phoneNumber) {
+  const cleanIncoming = sanitizePhone(phoneNumber);
+  return TECHNICIANS.find((tech) => sanitizePhone(tech.phone) === cleanIncoming);
+}
 
-// 2. Meta Permanent Access Token (starts with EAAB...)
-const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
-
-// 3. Phone Number ID from WhatsApp -> API Setup tab
-const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
-
-// In-memory store for active sessions (Replace with Supabase/DB for production)
-const userSessions = {};
+// Helper: Fetch available technicians matching vehicle type
+function getAvailableTechniciansForVehicle(vehicleType) {
+  return TECHNICIANS.filter((tech) => {
+    if (!tech.isAvailable) return false;
+    if (tech.vehicleSpecialty === 'Car & Bike') return true;
+    return tech.vehicleSpecialty.toLowerCase() === vehicleType.toLowerCase();
+  });
+}
 
 // ==========================================
 // HELPER FUNCTIONS TO SEND WHATSAPP MESSAGES
@@ -53,7 +67,7 @@ async function sendTextMessage(to, text) {
       `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`,
       {
         messaging_product: 'whatsapp',
-        to: to,
+        to: sanitizePhone(to),
         type: 'text',
         text: { body: text },
       },
@@ -65,7 +79,7 @@ async function sendTextMessage(to, text) {
       }
     );
   } catch (error) {
-    console.error('Error sending text:', error.response?.data || error.message);
+    console.error(`Error sending text to ${to}:`, error.response?.data || error.message);
   }
 }
 
@@ -76,7 +90,7 @@ async function sendButtons(to, text, buttons) {
       `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`,
       {
         messaging_product: 'whatsapp',
-        to: to,
+        to: sanitizePhone(to),
         type: 'interactive',
         interactive: {
           type: 'button',
@@ -97,121 +111,95 @@ async function sendButtons(to, text, buttons) {
       }
     );
   } catch (error) {
-    console.error('Error sending buttons:', error.response?.data || error.message);
+    console.error(`Error sending buttons to ${to}:`, error.response?.data || error.message);
   }
 }
 
-async function getWhatsAppMediaUrl(mediaId) {
+// Send image message
+async function sendImageMessage(to, imageUrl, caption) {
   try {
-    // 1. Ask Meta for the direct image download link
-    const res = await axios.get(
-      `https://graph.facebook.com/v20.0/${mediaId}`,
-      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
+    await axios.post(
+      `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: 'whatsapp',
+        to: sanitizePhone(to),
+        type: 'image',
+        image: {
+          link: imageUrl,
+          caption: caption,
+        },
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+      }
     );
-    const downloadUrl = res.data.url;
-
-    // 2. Download the binary image buffer using your token
-    const imageResponse = await axios.get(downloadUrl, {
-      headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
-      responseType: 'arraybuffer'
-    });
-
-    console.log(`Successfully received image for media ID: ${mediaId}`);
-    return downloadUrl; // Or upload this buffer to Supabase / AWS S3
   } catch (error) {
-    console.error('Error fetching media:', error.response?.data || error.message);
+    console.error(`Error sending image to ${to}:`, error.response?.data || error.message);
   }
 }
 
-// Step A: Send Job Alert to Technician
-async function alertTechniciansAboutJob(customerPhone, vehicleType, locationText) {
-  const jobText = 
+// ==========================================
+// NOTIFICATION DISPATCHERS
+// ==========================================
+
+// 1. Notify Admin about new job & dispatched technicians
+async function notifyAdminAboutJob(customerPhone, serviceType, vehicleType, locationText, alertedTechNames) {
+  const adminMessage =
+`🔔 *ADMIN ALERT: NEW BOOKING RECEIVED*
+--------------------------------
+*Customer:* +${customerPhone}
+*Vehicle:* ${vehicleType}
+*Service:* ${serviceType}
+*Location:* ${locationText}
+*Alerted Technicians:* ${alertedTechNames.length > 0 ? alertedTechNames.join(', ') : 'None available ⚠️'}
+--------------------------------
+Status: Awaiting technician acceptance.`;
+
+  console.log(`Notifying Admin at ${ADMIN_PHONE}`);
+  await sendTextMessage(ADMIN_PHONE, adminMessage);
+}
+
+// 2. Alert qualified technicians about the job
+async function alertTechniciansAboutJob(customerPhone, serviceType, vehicleType, locationText) {
+  const qualifiedTechs = getAvailableTechniciansForVehicle(vehicleType);
+
+  if (qualifiedTechs.length === 0) {
+    console.warn(`No available technicians found for ${vehicleType}`);
+    // Notify Admin of no availability
+    await sendTextMessage(
+      ADMIN_PHONE,
+      `⚠️ *NO TECHNICIANS AVAILABLE* for customer +${customerPhone} (${vehicleType} - ${serviceType}). Location: ${locationText}`
+    );
+    return [];
+  }
+
+  const jobText =
 `🚨 *NEW GHARGARAGE JOB ALERT!*
 --------------------------------
 *Vehicle:* ${vehicleType}
-*Service:* Doorstep Inspection & Repair
-*Customer Contact:* ${customerPhone}
-*Address:* ${locationText}
+*Service:* ${serviceType}
+*Customer Contact:* +${customerPhone}
+*Address/Location:* ${locationText}
 --------------------------------
 Would you like to accept this job?`;
 
-  // Send to Technician Rahul (Replace with your registered technician's phone number)
-  const technicianPhone = '919876543210'; 
+  const alertedNames = [];
 
-  console.log(`Sending job alert to technician at: ${technicianPhone}`);
+  for (const tech of qualifiedTechs) {
+    console.log(`Dispatching job alert to ${tech.name} (${tech.phone})`);
+    alertedNames.push(tech.name);
 
-  await sendButtons(technicianPhone, jobText, [
-    { id: `TECH_ACCEPT_${customerPhone}`, title: '✅ Accept Job' },
-    { id: `TECH_DECLINE_${customerPhone}`, title: '❌ Decline Job' }
-  ]);
+    await sendButtons(tech.phone, jobText, [
+      { id: `TECH_ACCEPT_${customerPhone}`, title: '✅ Accept Job' },
+      { id: `TECH_DECLINE_${customerPhone}`, title: '❌ Decline Job' },
+    ]);
+  }
+
+  return alertedNames;
 }
-
-async function sendEstimationSlip(customerPhone, bookingId, partsList, totalAmount) {
-  const slipText = 
-`📋 *GHARGARAGE ESTIMATION SLIP*
-*Job ID:* #${bookingId}
-----------------------------------
-*Required Parts & Labor:*
-${partsList}
-----------------------------------
-*Estimated Total:* ₹${totalAmount}
-*(Inclusive of doorstep labor & taxes)*
-
-Please review and confirm to proceed with repairs:`;
-
-  await sendButtons(customerPhone, slipText, [
-    { id: `APPROVE_${bookingId}`, title: '✅ Approve Repair' },
-    { id: `DECLINE_${bookingId}`, title: '❌ Decline' }
-  ]);
-}
-
-const QRCode = require('qrcode');
-
-// Helper to send image messages to WhatsApp
-async function sendImageMessage(to, imageUrl, caption) {
-  await axios.post(
-    `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`,
-    {
-      messaging_product: 'whatsapp',
-      to: to,
-      type: 'image',
-      image: {
-        link: imageUrl,
-        caption: caption
-      }
-    },
-    { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
-  );
-}
-
-// Generate UPI QR Code URL (using a free QR image endpoint or your own upload)
-async function sendPaymentQRCode(customerPhone, bookingId, amount) {
-  const upiId = 'yourbusiness@upi'; // Replace with your merchant UPI ID
-  const payeeName = 'GharGarage';
-  const upiString = `upi://pay?pa=${upiId}&pn=${payeeName}&am=${amount}&tn=Bill_${bookingId}`;
-
-  // Generate public QR code image link
-  const qrImageUrl = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(upiString)}`;
-
-  await sendImageMessage(
-    customerPhone,
-    qrImageUrl,
-    `💳 *GHARGARAGE PAYMENT INVOICE*\nTotal Payable: *₹${amount}*\n\nScan the QR code above using GPay, PhonePe, or Paytm to pay.`
-  );
-}
-
-async function sendReviewRequest(customerPhone) {
-  await sendButtons(
-    customerPhone,
-    '🚗✨ *Service Complete!* \nYour vehicle is ready and tuned. How was your GharGarage doorstep experience?',
-    [
-      { id: 'RATING_5', title: '⭐⭐⭐⭐⭐ Excellent' },
-      { id: 'RATING_4', title: '⭐⭐⭐⭐ Good' },
-      { id: 'RATING_3', title: '⭐⭐⭐ Average' }
-    ]
-  );
-}
-
 
 // ==========================================
 // 1. GET /webhook (Meta Handshake Verification)
@@ -229,10 +217,10 @@ app.get('/webhook', (req, res) => {
 });
 
 // ==========================================
-// 2. POST /webhook (THIS IS WHERE THE LOGIC LIVES)
+// 2. POST /webhook (Main Logic Flow)
 // ==========================================
 app.post('/webhook', async (req, res) => {
-  // Acknowledge Meta immediately with 200 OK
+  // Acknowledge Meta immediately to prevent timeout retries
   res.status(200).send('EVENT_RECEIVED');
 
   try {
@@ -243,39 +231,68 @@ app.post('/webhook', async (req, res) => {
     // Ignore read receipts or status updates
     if (!message) return;
 
-    const sender = message.from; // Customer WhatsApp Number
+    const sender = message.from;
     const msgType = message.type;
 
-    if (!userSessions[sender]) {
-      userSessions[sender] = { state: 'IDLE', vehicle: null };
-    }
+    // Check if message came from a registered technician
+    const activeTechnician = getTechnicianByPhone(sender);
 
+    // Initialize customer session if not already existing
+    if (!userSessions[sender]) {
+      userSessions[sender] = {
+        state: 'IDLE',
+        vehicle: null,
+        service: null,
+        location: null,
+      };
+    }
     const session = userSessions[sender];
 
-    // CASE A: User sends "HI" or greeting text
-    if (msgType === 'text') {
-      const userText = message.text.body.trim().toLowerCase();
-
-      if (userText === 'hi' || userText === 'hello' || session.state === 'IDLE') {
-        session.state = 'SELECTING_VEHICLE';
-
-        await sendButtons(
-          sender,
-          'Welcome to GharGarage! 🚗🏍️\n"Your Garage, At Your Doorstep."\n\nPlease select your vehicle type to begin:',
-          [
-            { id: 'SELECT_BIKE', title: '🏍️ Bike' },
-            { id: 'SELECT_CAR', title: '🚗 Car' },
-          ]
-        );
-        return;
-      }
-    }
-
-    // CASE B: User clicks on an interactive button
+    // ----------------------------------------------------
+    // CASE 1: BUTTON REPLIES
+    // ----------------------------------------------------
     if (msgType === 'interactive' && message.interactive.type === 'button_reply') {
       const buttonId = message.interactive.button_reply.id;
 
-      // 1. Vehicle Selection
+      // --- A. Technician Action: ACCEPT JOB ---
+      if (buttonId.startsWith('TECH_ACCEPT_')) {
+        const custPhone = buttonId.replace('TECH_ACCEPT_', '');
+        const techName = activeTechnician ? activeTechnician.name : 'A certified technician';
+        const techPhone = activeTechnician ? activeTechnician.phone : sender;
+
+        // 1. Confirm with Technician
+        await sendTextMessage(sender, `✅ You have accepted the job for customer +${custPhone}. Please contact them immediately.`);
+
+        // 2. Notify Customer
+        await sendTextMessage(
+          custPhone,
+          `🎉 Great news! Technician *${techName}* (${techPhone}) has accepted your booking and is heading your way.`
+        );
+
+        // 3. Notify Admin
+        await sendTextMessage(
+          ADMIN_PHONE,
+          `✅ *JOB ACCEPTED*\nTechnician: ${techName} (${techPhone})\nCustomer: +${custPhone}`
+        );
+        return;
+      }
+
+      // --- B. Technician Action: DECLINE JOB ---
+      if (buttonId.startsWith('TECH_DECLINE_')) {
+        const custPhone = buttonId.replace('TECH_DECLINE_', '');
+        const techName = activeTechnician ? activeTechnician.name : sender;
+
+        await sendTextMessage(sender, 'You declined this job. It will remain open for other technicians.');
+
+        // Notify Admin of decline
+        await sendTextMessage(
+          ADMIN_PHONE,
+          `ℹ️ Technician ${techName} declined job for Customer +${custPhone}.`
+        );
+        return;
+      }
+
+      // --- C. Customer Action: Vehicle Selection ---
       if (buttonId === 'SELECT_BIKE' || buttonId === 'SELECT_CAR') {
         session.vehicle = buttonId === 'SELECT_BIKE' ? 'Bike' : 'Car';
         session.state = 'SELECTING_SERVICE';
@@ -291,8 +308,9 @@ app.post('/webhook', async (req, res) => {
         return;
       }
 
-      // 2. Wash Selected -> Show Rate Card & Accept/Decline Buttons
+      // --- D. Customer Action: Wash Service Selected ---
       if (buttonId === 'SERVICE_WASH') {
+        session.service = 'Doorstep Foam Wash';
         session.state = 'WASH_DECISION';
         const price = session.vehicle === 'Car' ? '₹399' : '₹199';
 
@@ -307,17 +325,17 @@ app.post('/webhook', async (req, res) => {
         return;
       }
 
-      // 3. Wash Accepted
+      // --- E. Customer Action: Wash Accepted ---
       if (buttonId === 'WASH_ACCEPT') {
-        session.state = 'WASH_CONFIRMED';
+        session.state = 'AWAITING_LOCATION';
         await sendTextMessage(
           sender,
-          'Awesome! Your wash booking is confirmed. 🧼\nPlease send your live location or address so our washer can reach you.'
+          'Awesome! Your wash booking is confirmed. 🧼\nPlease send your street address or share your live WhatsApp location pin:'
         );
         return;
       }
 
-      // 4. Wash Declined
+      // --- F. Customer Action: Wash Declined ---
       if (buttonId === 'WASH_DECLINE') {
         session.state = 'IDLE';
         await sendTextMessage(
@@ -327,40 +345,47 @@ app.post('/webhook', async (req, res) => {
         return;
       }
 
-      // 5. Service / Repair Selected
+      // --- G. Customer Action: Service / Repair Selected ---
       if (buttonId === 'SERVICE_REPAIR') {
-        session.state = 'SERVICE_LOCATION';
+        session.service = 'Doorstep Inspection & Repair';
+        session.state = 'AWAITING_LOCATION';
+
         await sendTextMessage(
           sender,
-          `Got it! For ${session.vehicle} Service & Repair, our certified technician will visit your location for inspection.\n\nPlease share your live location or street address:`
+          `Got it! For ${session.vehicle} Service & Repair, our certified technician will visit your location for inspection.\n\nPlease share your street address or send your live WhatsApp location pin:`
         );
         return;
       }
     }
-  } catch (error) {
-    console.error('Error processing webhook event:', error);
-  }
 
-  // When Customer sends their address/location text
-if (msgType === 'text' && session.state === 'SERVICE_LOCATION') {
-  const customerAddress = message.text.body;
-  session.state = 'DISPATCHED';
+    // ----------------------------------------------------
+    // CASE 2: LOCATION RECEIVED (TEXT OR NATIVE WHATSAPP PIN)
+    // ----------------------------------------------------
+    if (session.state === 'AWAITING_LOCATION' || session.state === 'SERVICE_LOCATION' || session.state === 'WASH_CONFIRMED') {
+      let customerLocation = '';
 
-  // 1. Confirm to Customer
-  await sendTextMessage(sender, 'Thank you! Finding and alerting the nearest certified technician now... 🔍');
+      if (msgType === 'text') {
+        customerLocation = message.text.body.trim();
+      } else if (msgType === 'location') {
+        const loc = message.location;
+        const namePart = loc.name ? ` (${loc.name})` : '';
+        const addressPart = loc.address ? `\nAddress: ${loc.address}` : '';
+        customerLocation = `Lat: ${loc.latitude}, Long: ${loc.longitude}${namePart}${addressPart}\nMaps: https://maps.google.com/?q=${loc.latitude},${loc.longitude}`;
+      }
 
-  // 2. Alert the Technician!
-  await alertTechniciansAboutJob(sender, session.vehicle, customerAddress);
-  return;
-}
-});
+      if (customerLocation) {
+        session.location = customerLocation;
+        session.state = 'DISPATCHED';
 
+        // 1. Confirm with customer
+        await sendTextMessage(
+          sender,
+          'Thank you! Finding and alerting the nearest certified technician now... 🔍'
+        );
 
-
-// ==========================================
-// START SERVER
-// ==========================================
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`GharGarage Server is running on port ${PORT}`);
-});
+        // 2. Fetch & alert matched technicians
+        const alertedNames = await alertTechniciansAboutJob(
+          sender,
+          session.service || 'Doorstep Service',
+          session.vehicle,
+          customerLoca
