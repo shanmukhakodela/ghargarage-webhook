@@ -11,7 +11,6 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'GharGarage_Secret_777';
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 
-// Merchant UPI configuration for QR generation
 const MERCHANT_UPI_ID = process.env.MERCHANT_UPI_ID || 'ghargarage@upi';
 const MERCHANT_NAME = 'GharGarage';
 
@@ -36,9 +35,9 @@ const TECHNICIANS = [
   },
 ];
 
-// In-Memory Storage (Use Redis/PostgreSQL/Supabase in production)
-const userSessions = {}; // Key: senderPhone -> session details
-const bookings = {};     // Key: bookingId -> full booking state
+// In-Memory Storage
+const userSessions = {}; // Key: senderPhone -> session state
+const bookings = {};     // Key: bookingId -> booking data
 
 // ==========================================
 // HELPER UTILITIES
@@ -131,7 +130,7 @@ async function sendButtons(to, text, buttons) {
           action: {
             buttons: buttons.map((b) => ({
               type: 'reply',
-              reply: { id: b.id, title: b.title.substring(0, 20) }, // 20 char limit per Meta policy
+              reply: { id: b.id, title: b.title.substring(0, 20) }, // 20 chars max for WhatsApp API
             })),
           },
         },
@@ -174,7 +173,7 @@ async function sendImageMessage(to, imageUrl, caption) {
 }
 
 // ==========================================
-// WORKFLOW MESSAGING FUNCTIONS
+// BUSINESS WORKFLOW FUNCTIONS
 // ==========================================
 
 async function sendEstimationSlip(customerPhone, bookingId, partsList, totalAmount) {
@@ -190,61 +189,66 @@ ${partsList}
 
 Please review and confirm to proceed with repairs:`;
 
-  // Send slip with Approval / Decline to Customer
   await sendButtons(customerPhone, slipText, [
     { id: `APPROVE_${bookingId}`, title: '✅ Approve Repair' },
     { id: `DECLINE_${bookingId}`, title: '❌ Decline' },
   ]);
 
-  // Send copy to Admin
   await sendTextMessage(
     ADMIN_PHONE,
     `📋 *ESTIMATION SLIP SENT FOR #${bookingId}*\nCustomer: +${customerPhone}\nParts: ${partsList}\nTotal: ₹${totalAmount}`
   );
 }
 
-async function sendPaymentQRCode(customerPhone, bookingId, amount) {
+// Dispatches invoice, QR code, and actionable buttons to customer and technician
+async function presentPostServiceActionItems(booking) {
+  const bookingId = booking.id;
+  const amount = booking.totalAmount;
   const upiString = `upi://pay?pa=${MERCHANT_UPI_ID}&pn=${encodeURIComponent(MERCHANT_NAME)}&am=${amount}&tn=Bill_${bookingId}`;
   const qrImageUrl = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(upiString)}`;
 
+  // 1. Send Invoice & QR Code to Customer
   await sendImageMessage(
-    customerPhone,
+    booking.customerPhone,
     qrImageUrl,
-    `💳 *GHARGARAGE PAYMENT INVOICE*\nJob ID: #${bookingId}\nTotal Payable: *₹${amount}*\n\nScan the QR code above using GPay, PhonePe, or Paytm to pay.`
+    `🎉 *SERVICE COMPLETED!*\nJob ID: #${bookingId}\nTotal Bill: *₹${amount}*\n\nScan above using GPay, PhonePe, or Paytm to pay.`
   );
 
-  await sendButtons(customerPhone, 'Tap below once payment is completed:', [
-    { id: `PAID_${bookingId}`, title: '✅ I Have Paid' },
-  ]);
+  // 2. Action Items for Customer
+  await sendButtons(
+    booking.customerPhone,
+    `Please select your payment confirmation method:`,
+    [
+      { id: `PAID_ONLINE_${bookingId}`, title: '✅ Paid Online' },
+      { id: `PAID_CASH_${bookingId}`, title: '💵 Paid Cash' },
+    ]
+  );
+
+  // 3. Action Items for Technician
+  await sendButtons(
+    booking.technicianPhone,
+    `✅ Post-service photos saved! Invoice of ₹${amount} sent to customer.\n\nPlease confirm when payment is collected:`,
+    [
+      { id: `TECH_CONFIRM_PAY_${bookingId}`, title: '✅ Payment Received' },
+      { id: `TECH_CASH_PAY_${bookingId}`, title: '💵 Cash Collected' },
+    ]
+  );
 }
 
 async function sendReviewRequest(customerPhone, bookingId) {
   await sendButtons(
     customerPhone,
-    '🚗✨ *Service Complete!* \nYour vehicle is ready. How was your GharGarage doorstep experience?',
+    '🚗✨ *Service Complete & Paid!* \nHow was your GharGarage doorstep service experience?',
     [
-      { id: `RATE_5_${bookingId}`, title: '⭐⭐⭐⭐⭐ 5 Star' },
-      { id: `RATE_4_${bookingId}`, title: '⭐⭐⭐⭐ 4 Star' },
-      { id: `RATE_3_${bookingId}`, title: '⭐⭐⭐ 3 Star' },
+      { id: `RATE_5_${bookingId}`, title: '⭐ 5 Star - Great' },
+      { id: `RATE_4_${bookingId}`, title: '⭐ 4 Star - Good' },
+      { id: `RATE_3_${bookingId}`, title: '⭐ 3 Star - Okay' },
     ]
   );
 }
 
-async function notifyAdminAboutJob(customerPhone, bookingId, serviceType, vehicleType, locationText, alertedTechNames) {
-  const adminMessage =
-`🔔 *ADMIN: NEW BOOKING #${bookingId}*
---------------------------------
-*Customer:* +${customerPhone}
-*Vehicle:* ${vehicleType}
-*Service:* ${serviceType}
-*Location:* ${locationText}
-*Alerted Technicians:* ${alertedTechNames.length > 0 ? alertedTechNames.join(', ') : 'None available ⚠️'}`;
-
-  await sendTextMessage(ADMIN_PHONE, adminMessage);
-}
-
 // ==========================================
-// 1. GET /webhook (Meta Handshake Verification)
+// 1. GET /webhook (Meta Verification)
 // ==========================================
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
@@ -258,7 +262,7 @@ app.get('/webhook', (req, res) => {
 });
 
 // ==========================================
-// 2. POST /webhook (Main State Machine)
+// 2. POST /webhook (Main Controller)
 // ==========================================
 app.post('/webhook', async (req, res) => {
   res.status(200).send('EVENT_RECEIVED');
@@ -274,70 +278,91 @@ app.post('/webhook', async (req, res) => {
     const msgType = message.type;
     const activeTechnician = getTechnicianByPhone(sender);
 
-    // Initialize session if not present
     if (!userSessions[sender]) {
       userSessions[sender] = { state: 'IDLE', activeBookingId: null };
     }
     const session = userSessions[sender];
 
     // ====================================================
-    // A. INTERACTIVE BUTTON CLICKS
+    // A. INTERACTIVE BUTTON REPLIES
     // ====================================================
     if (msgType === 'interactive' && message.interactive.type === 'button_reply') {
       const buttonId = message.interactive.button_reply.id;
 
       // --------------------------------------------------
-      // STEP 1: TECHNICIAN ACCEPTS JOB
+      // STEP 1: TECHNICIAN ACCEPTS JOB (WITH LOCKING & NOTIFICATION)
       // --------------------------------------------------
       if (buttonId.startsWith('TECH_ACCEPT_')) {
         const bookingId = buttonId.replace('TECH_ACCEPT_', '');
         const booking = bookings[bookingId];
 
         if (!booking) {
-          await sendTextMessage(sender, '⚠️ This job is no longer available.');
+          await sendTextMessage(sender, '⚠️ This job does not exist or has expired.');
           return;
         }
 
-        const techName = activeTechnician ? activeTechnician.name : 'Sunil';
-        const techPhone = activeTechnician ? activeTechnician.phone : sender;
+        const attemptingTechName = activeTechnician ? activeTechnician.name : 'Another Technician';
+        const attemptingTechPhone = activeTechnician ? activeTechnician.phone : sender;
 
-        booking.technicianPhone = techPhone;
-        booking.technicianName = techName;
+        // CHECK IF ALREADY ACCEPTED BY ANOTHER TECHNICIAN
+        if (booking.technicianPhone && sanitizePhone(booking.technicianPhone) !== sanitizePhone(attemptingTechPhone)) {
+          // 1. Notify the technician who is trying to accept now
+          await sendTextMessage(
+            sender,
+            `⚠️ *JOB ALREADY ASSIGNED*\nJob #${bookingId} has already been accepted by technician *${booking.technicianName}*.\n\nYou will be notified for the next available job.`
+          );
+
+          // 2. Notify the technician who ALREADY accepted the job
+          await sendTextMessage(
+            booking.technicianPhone,
+            `ℹ️ *Notice:* Technician *${attemptingTechName}* (+${attemptingTechPhone}) attempted to accept Job #${bookingId}.\n\nDon't worry, this job remains securely assigned to *YOU*. Please continue with the customer visit.`
+          );
+
+          // 3. Notify Admin
+          await sendTextMessage(
+            ADMIN_PHONE,
+            `ℹ️ Tech ${attemptingTechName} tried to accept #${bookingId}, but it was already assigned to ${booking.technicianName}.`
+          );
+          return;
+        }
+
+        // FIRST TECHNICIAN TO ACCEPT
+        booking.technicianPhone = attemptingTechPhone;
+        booking.technicianName = attemptingTechName;
         booking.status = 'TECH_ACCEPTED';
 
-        // 1. Alert Customer with Tech details & ~30 mins ETA
+        // 1. Alert Customer with ~30 mins ETA
         await sendTextMessage(
           booking.customerPhone,
-          `🚗 Good news! Technician *${techName}* (📞 ${techPhone}) has accepted your booking.\n` +
+          `🚗 Good news! Technician *${attemptingTechName}* (📞 ${attemptingTechPhone}) has accepted your booking.\n` +
           `⏱️ *Estimated Arrival Time: Around 30 minutes.*\n\n` +
-          `The technician is on the way to your location!`
+          `The technician is on the way to your doorstep!`
         );
 
-        // 2. Inform Technician with arrival button
+        // 2. Send technician confirmation & Arrival Button
         await sendButtons(
           sender,
-          `✅ You accepted Booking #${bookingId}.\n📍 Customer Location: ${booking.location}\n📞 Contact: +${booking.customerPhone}\n\nWhen you reach the spot, tap below:`,
+          `✅ You accepted Booking #${bookingId}.\n📍 Customer Location: ${booking.location}\n📞 Contact: +${booking.customerPhone}\n\nWhen you reach the doorstep, tap below:`,
           [{ id: `TECH_ARRIVED_${bookingId}`, title: '📍 I Have Arrived' }]
         );
 
         // 3. Notify Admin
         await sendTextMessage(
           ADMIN_PHONE,
-          `✅ *TECH ACCEPTED #${bookingId}*\nTech: ${techName} (${techPhone})\nETA: ~30 mins to Customer: +${booking.customerPhone}`
+          `✅ *TECH ACCEPTED #${bookingId}*\nTech: ${attemptingTechName} (${attemptingTechPhone})\nETA: ~30 mins to Customer: +${booking.customerPhone}`
         );
         return;
       }
 
-      // Technician Declines Job
+      // Decline Job
       if (buttonId.startsWith('TECH_DECLINE_')) {
         const bookingId = buttonId.replace('TECH_DECLINE_', '');
         await sendTextMessage(sender, 'Job declined. Remaining technicians will be alerted.');
-        await sendTextMessage(ADMIN_PHONE, `ℹ️ Technician declined job #${bookingId}.`);
         return;
       }
 
       // --------------------------------------------------
-      // STEP 2: TECHNICIAN ARRIVAL NOTIFICATION
+      // STEP 2: TECHNICIAN ARRIVAL CONFIRMATION
       // --------------------------------------------------
       if (buttonId.startsWith('TECH_ARRIVED_')) {
         const bookingId = buttonId.replace('TECH_ARRIVED_', '');
@@ -347,7 +372,7 @@ app.post('/webhook', async (req, res) => {
           booking.status = 'AWAITING_PRE_PHOTOS';
           await sendTextMessage(
             sender,
-            `📸 *Arrival Confirmed!*\n\nPlease upload the vehicle pre-inspection photo(s) (overall vehicle, damages, odometer reading) before starting:`
+            `📸 *Arrival Confirmed!*\n\nPlease upload the vehicle pre-inspection photo(s) (condition, damages, odometer) via WhatsApp camera/attachment:`
           );
 
           await sendTextMessage(
@@ -359,7 +384,7 @@ app.post('/webhook', async (req, res) => {
       }
 
       // --------------------------------------------------
-      // STEP 4: CUSTOMER APPROVES ESTIMATION SLIP
+      // STEP 3: CUSTOMER APPROVES ESTIMATE
       // --------------------------------------------------
       if (buttonId.startsWith('APPROVE_')) {
         const bookingId = buttonId.replace('APPROVE_', '');
@@ -368,20 +393,17 @@ app.post('/webhook', async (req, res) => {
         if (booking) {
           booking.status = 'IN_PROGRESS';
 
-          // 1. Confirm to Customer
           await sendTextMessage(
             sender,
             `✅ You have approved the estimate of *₹${booking.totalAmount}*.\nTechnician is now proceeding with repair/service work!`
           );
 
-          // 2. Instruct Technician to start and upload post photos when done
           await sendTextMessage(
             booking.technicianPhone,
             `🎉 *ESTIMATE APPROVED!*\nCustomer approved the repair for #${bookingId}.\n\n` +
-            `👉 Please proceed with the service. Once done, upload post-service vehicle photo(s).`
+            `👉 Please proceed with the service. Once done, upload the post-service vehicle photo(s).`
           );
 
-          // 3. Inform Admin
           await sendTextMessage(
             ADMIN_PHONE,
             `✅ Customer approved estimate for #${bookingId} (₹${booking.totalAmount}). Work in progress.`
@@ -390,9 +412,7 @@ app.post('/webhook', async (req, res) => {
         return;
       }
 
-      // --------------------------------------------------
-      // STEP 4 (ALT): CUSTOMER DECLINES ESTIMATION SLIP
-      // --------------------------------------------------
+      // STEP 3 (ALT): CUSTOMER DECLINES ESTIMATE
       if (buttonId.startsWith('DECLINE_')) {
         const bookingId = buttonId.replace('DECLINE_', '');
         session.state = 'AWAITING_DECLINE_REASON';
@@ -400,43 +420,53 @@ app.post('/webhook', async (req, res) => {
 
         await sendTextMessage(
           sender,
-          '❌ You declined the estimation.\nPlease reply with the reason (e.g., price high, will repair later, parts not required):'
+          '❌ You declined the estimation.\nPlease reply with your reason (e.g. price high, repair later, not needed):'
         );
         return;
       }
 
       // --------------------------------------------------
-      // STEP 6: CUSTOMER TAPS "I HAVE PAID"
+      // STEP 4: PAYMENT CONFIRMATION (CUSTOMER OR TECH)
       // --------------------------------------------------
-      if (buttonId.startsWith('PAID_')) {
-        const bookingId = buttonId.replace('PAID_', '');
+      if (
+        buttonId.startsWith('PAID_ONLINE_') ||
+        buttonId.startsWith('PAID_CASH_') ||
+        buttonId.startsWith('TECH_CONFIRM_PAY_') ||
+        buttonId.startsWith('TECH_CASH_PAY_')
+      ) {
+        let bookingId = buttonId.replace(/^(PAID_ONLINE_|PAID_CASH_|TECH_CONFIRM_PAY_|TECH_CASH_PAY_)/, '');
         const booking = bookings[bookingId];
 
-        if (booking) {
-          booking.status = 'PAYMENT_COMPLETED';
+        if (booking && booking.status !== 'COMPLETED') {
+          booking.status = 'COMPLETED';
+          const paymentMode = buttonId.includes('CASH') ? 'Cash' : 'Online / UPI';
 
-          await sendTextMessage(sender, `🎉 Payment received! Thank you for choosing GharGarage.`);
-
-          if (booking.technicianPhone) {
-            await sendTextMessage(
-              booking.technicianPhone,
-              `💰 Customer confirmed payment for #${bookingId}. Job is completed!`
-            );
-          }
-
+          // Acknowledge Customer
           await sendTextMessage(
-            ADMIN_PHONE,
-            `💰 *PAYMENT RECEIVED #${bookingId}*\nAmount: ₹${booking.totalAmount}\nCustomer: +${sender}`
+            booking.customerPhone,
+            `🎉 Payment of *₹${booking.totalAmount}* (${paymentMode}) confirmed! Thank you for using GharGarage.`
           );
 
-          // Step 7: Send Review Request
-          await sendReviewRequest(sender, bookingId);
+          // Acknowledge Technician
+          await sendTextMessage(
+            booking.technicianPhone,
+            `💰 Payment of *₹${booking.totalAmount}* (${paymentMode}) confirmed for #${bookingId}. Job is complete!`
+          );
+
+          // Alert Admin
+          await sendTextMessage(
+            ADMIN_PHONE,
+            `💰 *PAYMENT CONFIRMED #${bookingId}*\nAmount: ₹${booking.totalAmount}\nMode: ${paymentMode}\nCustomer: +${booking.customerPhone}`
+          );
+
+          // Trigger Step 5: Customer Review
+          await sendReviewRequest(booking.customerPhone, bookingId);
         }
         return;
       }
 
       // --------------------------------------------------
-      // STEP 7: CUSTOMER REVIEW SELECTION
+      // STEP 5: CUSTOMER REVIEW
       // --------------------------------------------------
       if (buttonId.startsWith('RATE_')) {
         const parts = buttonId.split('_');
@@ -445,7 +475,7 @@ app.post('/webhook', async (req, res) => {
 
         await sendTextMessage(
           sender,
-          `Thank you for your rating (${stars} ⭐)! We are committed to making doorstep vehicle care seamless for you.`
+          `Thank you for your rating (${stars} ⭐)! We look forward to serving you again.`
         );
 
         await sendTextMessage(
@@ -455,9 +485,7 @@ app.post('/webhook', async (req, res) => {
         return;
       }
 
-      // --------------------------------------------------
-      // INITIAL FLOW: VEHICLE & SERVICE SELECTION
-      // --------------------------------------------------
+      // Vehicle & Service Selection
       if (buttonId === 'SELECT_BIKE' || buttonId === 'SELECT_CAR') {
         session.vehicle = buttonId === 'SELECT_BIKE' ? 'Bike' : 'Car';
         session.state = 'SELECTING_SERVICE';
@@ -514,7 +542,7 @@ app.post('/webhook', async (req, res) => {
     }
 
     // ====================================================
-    // B. IMAGE MESSAGES (VEHICLE PHOTOS FROM TECHNICIAN)
+    // B. IMAGE MESSAGES (PRE- & POST-SERVICE PHOTOS)
     // ====================================================
     if (msgType === 'image') {
       const techBooking = getActiveBookingForTechnician(sender);
@@ -539,23 +567,21 @@ app.post('/webhook', async (req, res) => {
           return;
         }
 
-        // Stage 2: Post-service photos
+        // Stage 2: Post-service photos (Triggers Action Items to Both)
         if (techBooking.status === 'IN_PROGRESS' || techBooking.status === 'AWAITING_POST_PHOTOS') {
           techBooking.postPhotos = techBooking.postPhotos || [];
           techBooking.postPhotos.push(imageId);
           techBooking.status = 'AWAITING_PAYMENT';
 
-          await sendTextMessage(
-            sender,
-            `✅ *Post-service photo recorded!*\nSending the payment invoice & UPI QR Code to the customer now.`
-          );
+          // Call handler that sends QR code, bill, and buttons to both customer & technician
+          await presentPostServiceActionItems(techBooking);
+          return;
+        }
 
-          // Step 6: Dispatch UPI QR Code to Customer
-          await sendPaymentQRCode(
-            techBooking.customerPhone,
-            techBooking.id,
-            techBooking.totalAmount
-          );
+        // Additional photo sent while awaiting payment
+        if (techBooking.status === 'AWAITING_PAYMENT') {
+          techBooking.postPhotos.push(imageId);
+          await sendTextMessage(sender, '📸 Additional vehicle photo saved.');
           return;
         }
       }
@@ -565,7 +591,7 @@ app.post('/webhook', async (req, res) => {
     // C. TEXT / LOCATION INPUTS
     // ====================================================
 
-    // 1. Customer provides decline reason
+    // Decline reason input
     if (msgType === 'text' && session.state === 'AWAITING_DECLINE_REASON') {
       const declineReason = message.text.body.trim();
       const booking = bookings[session.activeBookingId];
@@ -574,21 +600,18 @@ app.post('/webhook', async (req, res) => {
         booking.status = 'CANCELLED';
         booking.declineReason = declineReason;
 
-        // Acknowledge Customer
         await sendTextMessage(
           sender,
-          `Thank you for your feedback. Booking #${booking.id} has been cancelled.\nFeel free to contact us anytime!`
+          `Thank you for your feedback. Booking #${booking.id} has been cancelled.`
         );
 
-        // Notify Technician
         if (booking.technicianPhone) {
           await sendTextMessage(
             booking.technicianPhone,
-            `⚠️ *ESTIMATE DECLINED*\nCustomer declined Booking #${booking.id}.\nReason: "${declineReason}"\nJob is now closed.`
+            `⚠️ *ESTIMATE DECLINED*\nCustomer declined #${booking.id}.\nReason: "${declineReason}"\nJob is closed.`
           );
         }
 
-        // Notify Admin
         await sendTextMessage(
           ADMIN_PHONE,
           `⚠️ *BOOKING DECLINED #${booking.id}*\nCustomer: +${sender}\nReason: "${declineReason}"`
@@ -600,7 +623,7 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    // 2. Technician inputs Parts & Estimation Text
+    // Technician enters parts & estimate
     if (msgType === 'text' && activeTechnician) {
       const techBooking = getActiveBookingForTechnician(sender);
 
@@ -613,10 +636,9 @@ app.post('/webhook', async (req, res) => {
 
         await sendTextMessage(
           sender,
-          `📋 Estimation Slip created (Total: ₹${totalAmount}). Sent to customer for approval. Please wait for confirmation.`
+          `📋 Estimation Slip created (Total: ₹${totalAmount}). Sent to customer for approval. Please wait.`
         );
 
-        // Step 3: Send estimation slip with buttons to customer & admin
         await sendEstimationSlip(
           techBooking.customerPhone,
           techBooking.id,
@@ -627,7 +649,7 @@ app.post('/webhook', async (req, res) => {
       }
     }
 
-    // 3. Customer sends Address / Location Pin
+    // Customer provides address / location
     if (session.state === 'AWAITING_LOCATION') {
       let customerLocation = '';
 
@@ -641,7 +663,6 @@ app.post('/webhook', async (req, res) => {
       }
 
       if (customerLocation) {
-        // Create formal booking
         const bookingId = 'GG' + Math.floor(1000 + Math.random() * 9000);
         bookings[bookingId] = {
           id: bookingId,
@@ -662,9 +683,7 @@ app.post('/webhook', async (req, res) => {
           `Thank you! Your booking ID is *#${bookingId}*.\nFinding and alerting the nearest certified technician now... 🔍`
         );
 
-        // Alert Qualified Technicians
         const qualifiedTechs = getAvailableTechniciansForVehicle(bookings[bookingId].vehicle);
-        const alertedNames = [];
 
         const jobText =
 `🚨 *NEW GHARGARAGE JOB ALERT!*
@@ -677,27 +696,16 @@ app.post('/webhook', async (req, res) => {
 Would you like to accept this job?`;
 
         for (const tech of qualifiedTechs) {
-          alertedNames.push(tech.name);
           await sendButtons(tech.phone, jobText, [
             { id: `TECH_ACCEPT_${bookingId}`, title: '✅ Accept Job' },
             { id: `TECH_DECLINE_${bookingId}`, title: '❌ Decline Job' },
           ]);
         }
-
-        // Notify Admin
-        await notifyAdminAboutJob(
-          sender,
-          bookingId,
-          bookings[bookingId].service,
-          bookings[bookingId].vehicle,
-          customerLocation,
-          alertedNames
-        );
         return;
       }
     }
 
-    // 4. Greetings / Help
+    // Default / Greeting
     if (msgType === 'text') {
       const userText = message.text.body.trim().toLowerCase();
 
