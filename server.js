@@ -9,14 +9,14 @@ const TECHNICIANS = [
   {
     id: 1,
     name: 'Sunil',
-    phone: '8712223439', // Replace with your real test phone number
+    phone: '+91 8712223439', // Replace with your real test phone number
     vehicleSpecialty: 'Car & Bike',
     isAvailable: true
   },
   {
     id: 2,
     name: 'Ganesh',
-    phone: '7780736939', // Second technician number
+    phone: '+91 7780736939', // Second technician number
     vehicleSpecialty: 'Car',
     isAvailable: true
   }
